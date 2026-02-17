@@ -150,7 +150,7 @@ def autodetect_device_type():
     print0(f"Autodetected device type: {device_type}")
     return device_type
 
-def compute_init(device_type="cuda"): # cuda|cpu|mps
+def compute_init(device_type="cuda", seed=42): # cuda|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
     assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
@@ -162,15 +162,16 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     # Reproducibility
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.
     # The only place where global rng might be used is nn.Module initialization of the model weights.
-    torch.manual_seed(42)
+    torch.manual_seed(seed)
     if device_type == "cuda":
-        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed(seed)
     # skipping full reproducibility for now, possibly investigate slowdown later
     # torch.use_deterministic_algorithms(True)
 
     # Precision
     if device_type == "cuda":
-        torch.backends.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
     is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
