@@ -345,7 +345,7 @@ class GPT(nn.Module):
             'total': total,
         }
 
-    def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5):
+    def setup_optimizer(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0, adam_betas=(0.8, 0.95), scalar_lr=0.5, noise_lr=None):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
 
@@ -375,12 +375,13 @@ class GPT(nn.Module):
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
         ]
-        # Noise parameters (sqz, alpha from inject_noise) -- treat like scalar params
+        # Noise parameters (sqz, alpha from inject_noise)
         if noise_params:
+            effective_noise_lr = noise_lr if noise_lr is not None else scalar_lr * dmodel_lr_scale
             param_groups.append(
-                dict(kind='adamw', params=noise_params, lr=scalar_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
+                dict(kind='adamw', params=noise_params, lr=effective_noise_lr, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             )
-            print0(f"Added {len(noise_params)} noise parameters to optimizer")
+            print0(f"Added {len(noise_params)} noise parameters to optimizer (lr={effective_noise_lr:.6f})")
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
