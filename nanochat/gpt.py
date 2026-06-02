@@ -37,6 +37,10 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (half context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    # Ablation knobs (defaults reproduce original nanochat behavior)
+    lmhead_init_std: float = 0.001  # E1/D': set 0.02 to match nanogpt
+    freeze_skip_lambdas: bool = False  # E2: True freezes resid_lambdas=1.0, x0_lambdas=0.0
+    softcap: float = 15.0  # E3/B: <= 0 disables logit softcap
 
 
 def norm(x):
@@ -203,7 +207,7 @@ class GPT(nn.Module):
 
         # Embedding and unembedding
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
-        torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+        torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=self.config.lmhead_init_std)
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
         n_embd = self.config.n_embd
@@ -218,7 +222,12 @@ class GPT(nn.Module):
 
         # Per-layer scalars
         self.resid_lambdas.fill_(1.0)   # 1.0 => typical residual connections at init
-        self.x0_lambdas.fill_(0.1)      # 0.1 => small initial weight for skip connection to input embedding
+        if self.config.freeze_skip_lambdas:
+            self.x0_lambdas.fill_(0.0)  # frozen at 0 => no x0 skip connection
+            self.resid_lambdas.requires_grad_(False)
+            self.x0_lambdas.requires_grad_(False)
+        else:
+            self.x0_lambdas.fill_(0.1)  # 0.1 => small initial weight for skip connection to input embedding
 
         # Value embeddings (init like c_v: uniform with same std)
         for ve in self.value_embeds.values():
@@ -372,9 +381,10 @@ class GPT(nn.Module):
             dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
         ]
+        if not self.config.freeze_skip_lambdas:
+            param_groups.append(dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=adam_betas, eps=1e-10, weight_decay=0.0))
+            param_groups.append(dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0))  # higher beta1 for x0
         # Noise parameters (sqz, alpha from inject_noise) -- treat like scalar params
         if noise_params:
             param_groups.append(
@@ -417,11 +427,11 @@ class GPT(nn.Module):
         x = norm(x)
 
         # Forward the lm_head (compute logits)
-        softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., :self.config.vocab_size] # slice to remove padding
-        logits = logits.float() # switch to fp32 for logit softcap and loss computation
-        logits = softcap * torch.tanh(logits / softcap) # squash the logits
+        logits = logits.float() # switch to fp32 for softcap and loss computation
+        if self.config.softcap > 0:
+            logits = self.config.softcap * torch.tanh(logits / self.config.softcap)
 
         if targets is not None:
             # training: given the targets, compute and return the loss
